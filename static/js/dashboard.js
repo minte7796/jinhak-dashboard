@@ -155,11 +155,12 @@ function renderCardsGrid(items) {
           </div>
 
           <!-- Official Last Update Time Badge -->
-          <div class="bg-amber-50/70 border border-amber-200/80 rounded-lg p-2.5 text-xs text-amber-900 flex items-start space-x-2">
-            <i class="fa-solid fa-clock text-amber-600 mt-0.5"></i>
+          <div class="${item.status === '정상' ? 'bg-amber-50/70 border-amber-200/80 text-amber-900' : 'bg-red-50/80 border-red-200 text-red-900'} border rounded-lg p-2.5 text-xs flex items-start space-x-2">
+            <i class="fa-solid ${item.status === '정상' ? 'fa-clock text-amber-600' : 'fa-triangle-exclamation text-red-600'} mt-0.5"></i>
             <div class="flex-1 leading-tight">
-              <span class="text-[11px] font-semibold text-amber-800 block">대학별 최종 업데이트 시간</span>
+              <span class="text-[11px] font-semibold block">${item.status === '정상' ? '대학별 최종 업데이트 시간' : '수집 상태'}</span>
               <span class="font-bold text-slate-900 font-mono text-[12px]">${item.update_time || '확인 중'}</span>
+              ${item.status !== '정상' ? `<span class="block text-[10px] text-red-600 mt-0.5 font-sans">${item.status}</span>` : ''}
             </div>
           </div>
         </div>
@@ -201,9 +202,9 @@ function renderTable(items) {
           ${item.ratio}
         </span>
       </td>
-      <td class="py-3 px-4 text-slate-600 text-xs font-mono whitespace-nowrap">
-        <span class="inline-flex items-center text-amber-900 bg-amber-50 px-2 py-1 rounded border border-amber-200">
-          <i class="fa-regular fa-clock mr-1 text-amber-600"></i>${item.update_time}
+      <td class="py-3 px-4 text-xs font-mono whitespace-nowrap">
+        <span class="inline-flex items-center ${item.status === '정상' ? 'text-amber-900 bg-amber-50 border-amber-200' : 'text-red-900 bg-red-50 border-red-200'} px-2 py-1 rounded border">
+          <i class="fa-regular ${item.status === '정상' ? 'fa-clock text-amber-600' : 'fa-triangle-exclamation text-red-600'} mr-1"></i>${item.update_time}
         </span>
       </td>
       <td class="py-3 px-4 text-center whitespace-nowrap">
