@@ -33,19 +33,32 @@ async function loadData(force = false) {
     const url = force ? '/api/update' : '/api/ratios';
     const method = force ? 'POST' : 'GET';
     const resp = await fetch(url, { method });
+
+    if (!resp.ok) {
+      if (resp.status === 502 || resp.status === 503 || resp.status === 504) {
+        showToast('클라우드 서버가 절전 모드에서 깨어나는 중입니다. 약 20~30초 후 다시 시도해 주세요.', 'info');
+        return;
+      }
+      throw new Error(`HTTP ${resp.status}`);
+    }
+
     const json = await resp.json();
 
     if (json.success && json.data) {
       renderDashboard(json.data);
       if (force) {
-        showToast('최신 경쟁률 데이터가 성공적으로 갱신되었습니다.', 'success');
+        showToast(json.message || '최신 경쟁률 데이터가 성공적으로 갱신되었습니다.', 'success');
       }
     } else {
       showToast(json.message || '데이터를 불러오지 못했습니다.', 'error');
     }
   } catch (err) {
     console.error('Data load error:', err);
-    showToast('서버 통신 중 오류가 발생했습니다: ' + err.message, 'error');
+    if (err.message && (err.message.includes('Failed to fetch') || err.message.includes('NetworkError'))) {
+      showToast('서버 기동 중이거나 연결이 불안정합니다. 잠시 후 다시 시도해 주세요.', 'info');
+    } else {
+      showToast('데이터 갱신 중 일시적인 지연이 발생했습니다.', 'error');
+    }
   } finally {
     setLoadingState(false);
   }

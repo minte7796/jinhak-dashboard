@@ -4,42 +4,15 @@ import json
 import os
 import time
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 from bs4 import BeautifulSoup
 import urllib3
 
-# Suppress SSL insecure warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 CACHE_FILE = os.path.join(DATA_DIR, "latest_ratios.json")
 HISTORY_FILE = os.path.join(DATA_DIR, "history.json")
-
-SESSION = requests.Session()
-
-HEADERS_JINHAK = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-    'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
-    'Accept-Encoding': 'gzip, deflate',
-    'Referer': 'https://apply.jinhakapply.com/',
-    'Sec-Ch-Ua': '"Chromium";v="128", "Not;A=Brand";v="24", "Google Chrome";v="128"',
-    'Sec-Ch-Ua-Mobile': '?0',
-    'Sec-Ch-Ua-Platform': '"Windows"',
-    'Sec-Fetch-Dest': 'document',
-    'Sec-Fetch-Mode': 'navigate',
-    'Sec-Fetch-Site': 'same-site',
-    'Sec-Fetch-User': '?1',
-    'Upgrade-Insecure-Requests': '1'
-}
-
-HEADERS_UWAY = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-    'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
-    'Accept-Encoding': 'gzip, deflate',
-    'Referer': 'https://ratio.uwayapply.com/',
-    'Upgrade-Insecure-Requests': '1'
-}
 
 TARGET_UNIVERSITIES = [
     {
@@ -123,21 +96,20 @@ TARGET_UNIVERSITIES = [
 ]
 
 def fetch_page_content(target):
-    """
-    Fetches HTML content with robust headers, compression handling,
-    and fallback for Cloudflare/overseas IP blocks.
-    """
+    """Fetches HTML with thread-safe requests and clean headers."""
     url = target["ratio_url"]
-    headers = HEADERS_JINHAK if "jinhak" in url else HEADERS_UWAY
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Accept-Encoding': 'gzip, deflate',
+        'Referer': 'https://apply.jinhakapply.com/' if 'jinhak' in url else 'https://ratio.uwayapply.com/'
+    }
 
-    # Method 1: Direct requests fetch with custom session and headers
     try:
-        resp = SESSION.get(url, headers=headers, timeout=12, verify=False)
-        print(f"[{target['univ']}] Direct fetch status: {resp.status_code}")
-        
+        resp = requests.get(url, headers=headers, timeout=5, verify=False)
         if resp.status_code == 200:
             content = resp.content
-            # Try appropriate encodings
             for enc in ['utf-8', 'euc-kr', 'cp949']:
                 try:
                     text = content.decode(enc)
@@ -146,30 +118,14 @@ def fetch_page_content(target):
                 except (UnicodeDecodeError, LookupError):
                     continue
             return content.decode('utf-8', errors='replace')
-        elif resp.status_code in [403, 503]:
-            print(f"[{target['univ']}] Cloudflare/WAF block detected (HTTP {resp.status_code})")
+        else:
+            print(f"[{target['univ']}] Fetch status: {resp.status_code}")
     except Exception as e:
-        print(f"[{target['univ']}] Direct fetch error: {e}")
-
-    # Method 2: Fallback via public proxy if direct request blocked (403/Cloudflare)
-    proxy_urls = [
-        f"https://api.allorigins.win/raw?url={requests.utils.quote(url)}",
-    ]
-    for p_url in proxy_urls:
-        try:
-            print(f"[{target['univ']}] Trying fallback proxy...")
-            p_resp = requests.get(p_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10, verify=False)
-            if p_resp.status_code == 200:
-                p_text = p_resp.text
-                if any(k in p_text for k in [target["major_keyword"], target["jeonhyeong_keyword"], "경쟁률"]):
-                    print(f"[{target['univ']}] Fallback proxy succeeded!")
-                    return p_text
-        except Exception as pe:
-            print(f"[{target['univ']}] Fallback proxy error: {pe}")
+        print(f"[{target['univ']}] Fetch error: {e}")
 
     return None
 
-def parse_university_data(target):
+def parse_university_data(target, old_item=None):
     """Extract quota, applicants, ratio, and last updated time for a single university target."""
     result = {
         "id": target["id"],
@@ -177,11 +133,11 @@ def parse_university_data(target):
         "campus": target.get("campus", ""),
         "admission_type": target["admission_type"],
         "major": target["major"],
-        "quota": "-",
-        "applicants": "-",
-        "ratio": "-",
-        "ratio_num": 0.0,
-        "update_time": "확인 중",
+        "quota": old_item.get("quota", "-") if old_item else "-",
+        "applicants": old_item.get("applicants", "-") if old_item else "-",
+        "ratio": old_item.get("ratio", "-") if old_item else "-",
+        "ratio_num": old_item.get("ratio_num", 0.0) if old_item else 0.0,
+        "update_time": old_item.get("update_time", "확인 중") if old_item else "확인 중",
         "ratio_url": target["ratio_url"],
         "system": target["system"],
         "color": target["color"],
@@ -189,17 +145,19 @@ def parse_university_data(target):
         "status": "정상",
         "checked_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
-    
+
     try:
         html = fetch_page_content(target)
         if not html:
-            result["status"] = "접속 제한 (해외IP/Cloudflare 차단)"
-            result["update_time"] = "접속 제한됨"
+            if old_item and old_item.get("quota") != "-":
+                result["status"] = "접속 지연 (이전 데이터 유지)"
+            else:
+                result["status"] = "접속 제한 (해외IP/Cloudflare 차단)"
             return result
-            
+
         soup = BeautifulSoup(html, 'html.parser')
         full_text = soup.get_text()
-        
+
         # 1. Extract University Official Last Updated Time
         m_uway = re.search(r'(\d{4}년\s*\d{1,2}월\s*\d{1,2}일\s*\d{1,2}시(?:\s*\d{1,2}분)?(?:\s*기준)?)', full_text)
         if m_uway:
@@ -212,22 +170,21 @@ def parse_university_data(target):
                 m_fallback = re.search(r'(\d{4}[-./년]\s*\d{1,2}[-./월]\s*\d{1,2}[일]?\s*(?:[오전|오후]*\s*\d{1,2}[:시]\s*\d{1,2}))', full_text)
                 if m_fallback:
                     result["update_time"] = m_fallback.group(1).strip()
-                    
+
         # 2. Extract Table & Major Information
         tables = soup.find_all('table')
         target_table = None
-        
+
         for table in tables:
             caption = table.caption.get_text().strip() if table.caption else ""
             prev = table.find_previous(['h1', 'h2', 'h3', 'h4', 'h5', 'div', 'span', 'p'])
             prev_txt = prev.get_text().strip() if prev else ""
-            
             full_title = f"{caption} {prev_txt}".strip()
-            
+
             if target["jeonhyeong_keyword"] in full_title:
                 target_table = table
                 break
-                
+
         if not target_table:
             for table in tables:
                 t_head = table.get_text()[:200]
@@ -238,7 +195,7 @@ def parse_university_data(target):
         matched_row = None
         exact_matched_row = None
         partial_matched_row = None
-        
+
         if target_table:
             for tr in target_table.find_all('tr'):
                 cells = [re.sub(r'\s+', ' ', td.get_text().strip().replace('\xa0', ' ')) for td in tr.find_all(['td', 'th'])]
@@ -249,9 +206,9 @@ def parse_university_data(target):
                     break
                 elif any(target["major_keyword"] in cell and len(cell) < 30 for cell in cells):
                     partial_matched_row = cells
-                    
+
             matched_row = exact_matched_row or partial_matched_row
-            
+
         # 3. Parse numbers (quota, applicants, ratio) from matched_row
         if matched_row:
             for i in range(len(matched_row) - 1, -1, -1):
@@ -261,7 +218,7 @@ def parse_university_data(target):
                     rm = re.search(r'([\d.]+)\s*:', val)
                     if rm:
                         result["ratio_num"] = float(rm.group(1))
-                        
+
                     num_cells = []
                     for j in range(i - 1, -1, -1):
                         c = matched_row[j].replace(',', '').strip()
@@ -274,19 +231,24 @@ def parse_university_data(target):
                         result["quota"] = num_cells[1]
                     elif len(num_cells) == 1:
                         result["applicants"] = num_cells[0]
+                    result["status"] = "정상"
                     break
         else:
-            result["status"] = "대상 데이터 탐색 실패"
-            
+            if old_item and old_item.get("quota") != "-":
+                result["status"] = "데이터 갱신 지연 (이전 데이터 유지)"
+            else:
+                result["status"] = "대상 데이터 탐색 실패"
+
     except Exception as e:
+        print(f"[{target['univ']}] Parse error: {e}")
         result["status"] = f"오류 발생: {str(e)}"
-        
+
     return result
 
 def scrape_all_targets():
-    """Scrapes all 6 target universities, calculates deltas and metrics, saves cache."""
+    """Scrapes all 6 targets concurrently and saves to cache."""
     os.makedirs(DATA_DIR, exist_ok=True)
-    
+
     old_data = {}
     if os.path.exists(CACHE_FILE):
         try:
@@ -296,16 +258,21 @@ def scrape_all_targets():
                     old_data[item["id"]] = item
         except Exception:
             pass
-            
+
+    # Concurrent parallel scraping with individual thread safety
+    def do_task(t):
+        return parse_university_data(t, old_data.get(t["id"]))
+
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        raw_results = list(executor.map(do_task, TARGET_UNIVERSITIES))
+
     items = []
     total_quota = 0
     total_applicants = 0
     highest_ratio_item = None
     highest_ratio = -1.0
-    
-    for target in TARGET_UNIVERSITIES:
-        data = parse_university_data(target)
-        
+
+    for data in raw_results:
         prev_item = old_data.get(data["id"])
         if prev_item and str(prev_item.get("applicants", "")).isdigit() and str(data["applicants"]).isdigit():
             prev_app = int(prev_item["applicants"])
@@ -314,19 +281,19 @@ def scrape_all_targets():
             data["diff_applicants"] = diff_app
         else:
             data["diff_applicants"] = 0
-            
+
         if prev_item and prev_item.get("ratio_num") is not None:
             prev_r = float(prev_item.get("ratio_num", 0.0))
             curr_r = float(data.get("ratio_num", 0.0))
             data["diff_ratio"] = round(curr_r - prev_r, 2)
         else:
             data["diff_ratio"] = 0.0
-            
+
         if str(data["quota"]).isdigit():
             total_quota += int(data["quota"])
         if str(data["applicants"]).isdigit():
             total_applicants += int(data["applicants"])
-            
+
         if data["ratio_num"] > highest_ratio:
             highest_ratio = data["ratio_num"]
             highest_ratio_item = {
@@ -335,11 +302,11 @@ def scrape_all_targets():
                 "ratio": data["ratio"],
                 "ratio_num": data["ratio_num"]
             }
-            
+
         items.append(data)
-        
+
     avg_ratio = round(total_applicants / total_quota, 2) if total_quota > 0 else 0.0
-    
+
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     summary = {
         "updated_at": now_str,
@@ -353,31 +320,37 @@ def scrape_all_targets():
         "highest_ratio_item": highest_ratio_item,
         "items": items
     }
-    
-    with open(CACHE_FILE, 'w', encoding='utf-8') as f:
-        json.dump(summary, f, ensure_ascii=False, indent=2)
-        
-    history = []
-    if os.path.exists(HISTORY_FILE):
-        try:
-            with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
-                history = json.load(f)
-        except Exception:
-            history = []
-            
-    history_entry = {
-        "timestamp": now_str,
-        "total_applicants": total_applicants,
-        "avg_ratio_num": avg_ratio,
-        "univ_ratios": {item["univ"]: item["ratio_num"] for item in items}
-    }
-    history.append(history_entry)
-    if len(history) > 100:
-        history = history[-100:]
-        
-    with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
-        json.dump(history, f, ensure_ascii=False, indent=2)
-        
+
+    try:
+        with open(CACHE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(summary, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+    try:
+        history = []
+        if os.path.exists(HISTORY_FILE):
+            try:
+                with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
+                    history = json.load(f)
+            except Exception:
+                history = []
+
+        history_entry = {
+            "timestamp": now_str,
+            "total_applicants": total_applicants,
+            "avg_ratio_num": avg_ratio,
+            "univ_ratios": {item["univ"]: item["ratio_num"] for item in items}
+        }
+        history.append(history_entry)
+        if len(history) > 100:
+            history = history[-100:]
+
+        with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
+            json.dump(history, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
     return summary
 
 def get_latest_data(force_refresh=False):
@@ -387,16 +360,8 @@ def get_latest_data(force_refresh=False):
             with open(CACHE_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
                 if data and "items" in data and len(data["items"]) == len(TARGET_UNIVERSITIES):
-                    all_good = all(it.get("status") == "정상" for it in data["items"])
-                    if all_good:
-                        return data
+                    return data
         except Exception:
             pass
-            
-    return scrape_all_targets()
 
-if __name__ == "__main__":
-    print("Testing live scrape with requests...")
-    res = scrape_all_targets()
-    for item in res["items"]:
-        print(f"[{item['univ']}] {item['major']}: {item['quota']}명 / {item['applicants']}명 ({item['ratio']}) | {item['update_time']} | {item['status']}")
+    return scrape_all_targets()
